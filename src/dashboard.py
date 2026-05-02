@@ -1,10 +1,13 @@
 """
 dashboard.py — Hemodialysis Session Risk Prediction Dashboard
 Streamlit app that:
-  1. Collects patient demographics (SEX, AGE) and clinical signals (H0–H5)
+  1. Collects patient demographics (SEX, AGE, DIA) and clinical signals (H0–H5)
   2. Simulates missing hours via KNN trajectory with distance weighting
   3. Applies a selected pre-trained .pkl model to predict TARGET (hypotension risk)
   4. Visualises results interactively and exports a CSV report
+
+Usage:
+    streamlit run dashboard.py
 """
 
 import io
@@ -13,7 +16,6 @@ import pickle
 import warnings
 
 import joblib
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -24,17 +26,45 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
+# CONSTANTS — must match dataset_flat_V2.csv column schema exactly
 # ─────────────────────────────────────────────────────────────────────────────
-CLINICAL_VARS = [
-    "IWG", "VOL", "KT", "BFR", "HBC",
-    "APR", "VPR", "TMP", "SBP", "DBP", "HRA", "TUF",
+
+# Numeric clinical variables (one input per hour per variable)
+NUMERIC_VARS = [
+    "WDR", "WPR", "WPO", "IWG",
+    "KT", "BFR", "HBC",
+    "APR", "VPR", "TMP",
+    "SBP", "DBP",
+    "TUF",
 ]
+
+# Binary/categorical variables encoded as 0/1 in the dataset.
+# All three BAT_GROUP columns are present in dataset_flat_V2.csv
+# (no drop_first was used in the notebook's get_dummies call).
+BINARY_VARS = [
+    "BAT_GROUP_Grupo 1 - ACF 3A5",
+    "BAT_GROUP_Grupo 2 - EuCliD",
+    "BAT_GROUP_Grupo 3 - Demais classes",
+]
+
+# Human-readable labels for the bath group radio selector
+BAT_GROUP_OPTIONS = {
+    "Grupo 1 - ACF 3A5":        "BAT_GROUP_Grupo 1 - ACF 3A5",
+    "Grupo 2 - EuCliD":         "BAT_GROUP_Grupo 2 - EuCliD",
+    "Grupo 3 - Demais classes": "BAT_GROUP_Grupo 3 - Demais classes",
+}
+
+# Full ordered list used by simulate_missing_hours and build_flat_vector
+CLINICAL_VARS = NUMERIC_VARS + BINARY_VARS
+
 ALL_HOURS = ["H0", "H1", "H2", "H3", "H4", "H5"]
 
+# ── Variable display labels ──────────────────────────────────────────────────
 VAR_LABELS = {
+    "WDR": "Dry Weight (Kg)",
+    "WPR": "Pre-dialysis Weight (Kg)",
+    "WPO": "Post-dialysis Weight (Kg)",
     "IWG": "Interdialytic Weight Gain (Kg)",
-    "VOL": "Volume Changes (L)",
     "KT":  "Urea Clearance (L)",
     "BFR": "Blood Flow Rate (mL/min)",
     "HBC": "Bath Conductivity (mScm)",
@@ -43,14 +73,19 @@ VAR_LABELS = {
     "TMP": "Transmembrane Pressure (mmHg)",
     "SBP": "Systolic Blood Pressure (mmHg)",
     "DBP": "Diastolic Blood Pressure (mmHg)",
-    "HRA": "Heart Rate (bpm)",
     "TUF": "Total Ultrafiltration (mL)",
+    "BAT_GROUP_Grupo 1 - ACF 3A5":        "Bath Group: ACF 3A5 (0/1)",
+    "BAT_GROUP_Grupo 2 - EuCliD":         "Bath Group: EuCliD (0/1)",
+    "BAT_GROUP_Grupo 3 - Demais classes": "Bath Group: Other classes (0/1)",
 }
 
+# (default, min, max, step) for numeric inputs
 VAR_DEFAULTS = {
-    "IWG": (0.0, -5.0, 10.0, 0.1),
-    "VOL": (0.0, -20.0, 60.0, 0.1),
-    "KT":  (5.0,  0.0, 80.0, 0.1),
+    "WDR": (65.0,  20.0, 200.0, 0.1),
+    "WPR": (67.0,  20.0, 200.0, 0.1),
+    "WPO": (65.0,  20.0, 200.0, 0.1),
+    "IWG": (2.0,  -5.0,  10.0, 0.1),
+    "KT":  (5.0,   0.0,  80.0, 0.1),
     "BFR": (350.0, 50.0, 500.0, 1.0),
     "HBC": (14.0,  8.0,  20.0, 0.1),
     "APR": (-150.0, -300.0, 0.0, 1.0),
@@ -58,21 +93,51 @@ VAR_DEFAULTS = {
     "TMP": (200.0,  0.0, 600.0, 1.0),
     "SBP": (130.0, 60.0, 250.0, 1.0),
     "DBP": (80.0,  40.0, 140.0, 1.0),
-    "HRA": (75.0,  30.0, 200.0, 1.0),
-    "TUF": (0.05, -1.0,   2.0, 0.01),
+    "TUF": (500.0,  0.0, 5000.0, 10.0),
 }
 
+# ── Dialyzer lookup ──────────────────────────────────────────────────────────
+DIALYZER_MAP = {
+    "EuCliD - FX CorDiax 60":    1,
+    "FX CorDiax 800":            2,
+    "EuCliD - FX CorDiax 600":   3,
+    "EuCliD - FX CorDiax 80":    4,
+    "ELISIO 210":                5,
+    "FX 100":                    6,
+    "EuCliD - FX CorDiax 800":   7,
+    "FX 80":                     8,
+    "Solacea 21H":               9,
+    "Evodial":                   10,
+    "Sureflux 2.1":              11,
+    "EuCliD - HF-80 S":          12,
+    "EuCliD - Sureflux-21L":     13,
+    "FILTRYZER NF-2.1H":         14,
+    "EuCliD - FX60":             15,
+    "EuCliD - FX-HDF-600":       16,
+    "EuCliD - Sureflux - 190UX": 17,
+    "FX 60":                     18,
+    "EuCliD - FX80":             19,
+    "TorayLight NS-21S":         20,
+    "BK-21-F":                   21,
+    "EuCliD - FB-190 UGA":       22,
+    "EuCliD - FX-HDF-800":       23,
+    "Solacea 19H":               24,
+    "FX CorDiax 1000":           25,
+    "FX CorDiax 600":            26,
+}
+
+# ── Model options ─────────────────────────────────────────────────────────────
 MODEL_OPTIONS = {
-    "K-Nearest Neighbor (KNN)":    "models/modelo_knn.pkl",
-    "Random Forest (RF)":          "models/modelo_RF.pkl",
-    "Support Vector Machine (SVM)":"models/modelo_svm.pkl",
-    "XGBoost":                     "models/modelo_xgboost.pkl",
-    "Decision Tree (DT)":          "models/modelo_DT.pkl",
-    "Multi-Layer Perceptron (MLP)":"models/modelo_MLP.pkl",
-    "Naive Bayes (NB)":            "models/modelo_NB.pkl",
+    "K-Nearest Neighbor (KNN)":     "models_V2/modelo_knn.pkl",
+    "Random Forest (RF)":           "models_V2/modelo_RF.pkl",
+    "Support Vector Machine (SVM)": "models_V2/modelo_svm.pkl",
+    "XGBoost":                      "models_V2/modelo_xgboost.pkl",
+    "Decision Tree (DT)":           "models_V2/modelo_DT.pkl",
+    "Multi-Layer Perceptron (MLP)": "models_V2/modelo_MLP.pkl",
+    "Naive Bayes (NB)":             "models_V2/modelo_NB.pkl",
 }
 
-DATASET_PATH = "data/dataset_flat.csv"
+DATASET_PATH = "data/dataset_flat_V2.csv"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -85,138 +150,87 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CUSTOM CSS — clinical/medical dark theme
+# CUSTOM CSS — clinical dark theme
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'IBM Plex Sans', sans-serif;
-}
+html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 
-/* Background */
-.stApp {
-    background-color: #0a0e17;
-    color: #c8d8e8;
-}
+.stApp { background-color: #0a0e17; color: #c8d8e8; }
 
-/* Sidebar */
 section[data-testid="stSidebar"] {
     background-color: #0d1220 !important;
     border-right: 1px solid #1e2d45;
 }
 
-/* Headers */
 h1 { font-family: 'IBM Plex Mono', monospace; color: #4fc3f7 !important; letter-spacing: -1px; }
 h2, h3 { font-family: 'IBM Plex Mono', monospace; color: #81d4fa !important; }
 
-/* Metric cards */
 div[data-testid="metric-container"] {
     background: linear-gradient(135deg, #0d1a2e 0%, #112240 100%);
-    border: 1px solid #1e3a5f;
-    border-radius: 8px;
-    padding: 12px;
+    border: 1px solid #1e3a5f; border-radius: 8px; padding: 12px;
 }
 div[data-testid="metric-container"] label { color: #64b5f6 !important; font-size: 0.75rem !important; }
-div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #e3f2fd !important; font-family: 'IBM Plex Mono', monospace; }
+div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
+    color: #e3f2fd !important; font-family: 'IBM Plex Mono', monospace;
+}
 
-/* Buttons */
 .stButton > button {
     background: linear-gradient(135deg, #1565c0, #0d47a1) !important;
-    color: #e3f2fd !important;
-    border: 1px solid #1976d2 !important;
-    border-radius: 6px !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-weight: 600 !important;
-    letter-spacing: 0.5px !important;
+    color: #e3f2fd !important; border: 1px solid #1976d2 !important;
+    border-radius: 6px !important; font-family: 'IBM Plex Mono', monospace !important;
+    font-weight: 600 !important; letter-spacing: 0.5px !important;
     transition: all 0.2s ease !important;
 }
 .stButton > button:hover {
     background: linear-gradient(135deg, #1976d2, #1565c0) !important;
-    border-color: #42a5f5 !important;
-    box-shadow: 0 0 12px rgba(66,165,245,0.3) !important;
+    border-color: #42a5f5 !important; box-shadow: 0 0 12px rgba(66,165,245,0.3) !important;
 }
 
-/* Download button */
 .stDownloadButton > button {
     background: linear-gradient(135deg, #1b5e20, #2e7d32) !important;
-    color: #e8f5e9 !important;
-    border: 1px solid #388e3c !important;
-    border-radius: 6px !important;
-    font-family: 'IBM Plex Mono', monospace !important;
+    color: #e8f5e9 !important; border: 1px solid #388e3c !important;
+    border-radius: 6px !important; font-family: 'IBM Plex Mono', monospace !important;
 }
 
-/* Expanders */
-details {
-    background: #0d1a2e !important;
-    border: 1px solid #1e3a5f !important;
-    border-radius: 8px !important;
-}
+details { background: #0d1a2e !important; border: 1px solid #1e3a5f !important; border-radius: 8px !important; }
 
-/* Number inputs */
-input[type="number"] {
-    background: #0d1a2e !important;
-    color: #c8d8e8 !important;
-    border: 1px solid #1e3a5f !important;
-}
+input[type="number"] { background: #0d1a2e !important; color: #c8d8e8 !important; border: 1px solid #1e3a5f !important; }
 
-/* Selectbox */
-div[data-baseweb="select"] > div {
-    background: #0d1a2e !important;
-    border-color: #1e3a5f !important;
-    color: #c8d8e8 !important;
-}
+div[data-baseweb="select"] > div { background: #0d1a2e !important; border-color: #1e3a5f !important; color: #c8d8e8 !important; }
 
-/* Alert boxes */
 .alert-danger {
     background: linear-gradient(135deg, #3e0000, #5c1a1a);
-    border: 1px solid #c62828;
-    border-left: 4px solid #f44336;
-    border-radius: 8px;
-    padding: 16px 20px;
-    color: #ffcdd2;
+    border: 1px solid #c62828; border-left: 4px solid #f44336;
+    border-radius: 8px; padding: 16px 20px; color: #ffcdd2;
     font-family: 'IBM Plex Mono', monospace;
 }
 .alert-safe {
     background: linear-gradient(135deg, #003300, #1a3d1a);
-    border: 1px solid #2e7d32;
-    border-left: 4px solid #4caf50;
-    border-radius: 8px;
-    padding: 16px 20px;
-    color: #c8e6c9;
+    border: 1px solid #2e7d32; border-left: 4px solid #4caf50;
+    border-radius: 8px; padding: 16px 20px; color: #c8e6c9;
     font-family: 'IBM Plex Mono', monospace;
 }
 
-/* Tag chips */
 .chip-observed {
-    background: #0d3b5e; color: #4fc3f7;
-    border: 1px solid #1976d2;
+    background: #0d3b5e; color: #4fc3f7; border: 1px solid #1976d2;
     padding: 2px 8px; border-radius: 12px;
     font-size: 0.7rem; font-family: 'IBM Plex Mono', monospace;
 }
 .chip-simulated {
-    background: #1a2700; color: #aed581;
-    border: 1px solid #558b2f;
+    background: #1a2700; color: #aed581; border: 1px solid #558b2f;
     padding: 2px 8px; border-radius: 12px;
     font-size: 0.7rem; font-family: 'IBM Plex Mono', monospace;
 }
 
-/* Divider */
 hr { border-color: #1e3a5f !important; }
-
-/* Dataframe */
 .stDataFrame { border: 1px solid #1e3a5f !important; border-radius: 8px; }
-
-/* Tabs */
 .stTabs [data-baseweb="tab-list"] { background: #0d1a2e; border-bottom: 1px solid #1e3a5f; }
 .stTabs [data-baseweb="tab"] { color: #64b5f6 !important; font-family: 'IBM Plex Mono', monospace; }
 .stTabs [aria-selected="true"] { color: #4fc3f7 !important; border-bottom: 2px solid #4fc3f7 !important; }
-
-/* Slider */
 .stSlider > div > div > div { background: #1976d2 !important; }
-
-/* Radio */
 .stRadio > div { color: #c8d8e8; }
 </style>
 """, unsafe_allow_html=True)
@@ -238,6 +252,28 @@ def simulate_missing_hours(
     k: int = 10,
     use_demographics: bool = True,
 ) -> dict:
+    """
+    Simulates missing hourly clinical measurements using trajectory KNN
+    with inverse-distance weighting.
+
+    Parameters
+    ----------
+    observed : dict
+        {variable: {hour: value | None}}
+        Hours with non-None values are treated as observed.
+    sex, age : int
+        Patient demographics (used in distance if use_demographics=True).
+    df : pd.DataFrame
+        Historical session dataset (dataset_flat_V2.csv).
+    k : int
+        Number of nearest neighbours.
+    use_demographics : bool
+        Include SEX/AGE in the feature vector for neighbour search.
+
+    Returns
+    -------
+    dict  {variable: {hour: float | None}}
+    """
     feature_cols = []
     query_values = []
 
@@ -256,7 +292,9 @@ def simulate_missing_hours(
                 query_values.append(float(val))
 
     if not feature_cols:
-        raise ValueError("No observed hours found. Provide at least H0 for one clinical variable.")
+        raise ValueError(
+            "No observed values found. Provide at least one H0 clinical measurement."
+        )
 
     all_clinical_cols = [
         f"{v}_{h}"
@@ -300,8 +338,17 @@ def simulate_missing_hours(
     return result
 
 
-def build_flat_vector(full_result: dict, sex: int, age: int) -> pd.DataFrame:
-    row = {"SEX": sex, "AGE": age}
+def build_flat_vector(full_result: dict, sex: int, age: int, dia: int) -> pd.DataFrame:
+    """
+    Converts the simulate_missing_hours output dict into a single-row
+    DataFrame with columns in the same order as dataset_flat_V2.csv,
+    ready to be passed to a pre-trained .pkl model.
+
+    Note: dataset_flat_V2.csv was saved without index=False, so pandas
+    wrote the row index as 'Unnamed: 0'. The model was fitted with that
+    column present, so we must include it (value 0 is used as a placeholder).
+    """
+    row = {"SEX": sex, "AGE": age, "DIA": dia}
     for var in CLINICAL_VARS:
         for hour in ALL_HOURS:
             col = f"{var}_{hour}"
@@ -312,34 +359,21 @@ def build_flat_vector(full_result: dict, sex: int, age: int) -> pd.DataFrame:
 @st.cache_resource(show_spinner=False)
 def load_model(model_path: str):
     """
-    Robust model loader with three fallback strategies.
-
-    The error 'STACK_GLOBAL requires str' is a pickle version mismatch:
-    the .pkl was serialised in an older scikit-learn / Python environment
-    and is being deserialised by a newer one whose internal class paths
-    changed (bytes where str is now required).
-
-    Fix order:
-      1. joblib.load          — sklearn's recommended serialiser; handles most mismatches
-      2. pickle + latin1      — recovers Python-2-era pickles (bytes → str coercion)
-      3. pickle (plain)       — last resort; may still raise on severe mismatches
+    Robust .pkl loader with three fallback strategies to handle
+    cross-version scikit-learn pickle mismatches.
     """
     errors = {}
-
-    # ── Strategy 1: joblib ────────────────────────────────────────────────────
     try:
         return joblib.load(model_path)
     except Exception as e:
         errors["joblib"] = str(e)
 
-    # ── Strategy 2: pickle with latin-1 encoding ──────────────────────────────
     try:
         with open(model_path, "rb") as f:
             return pickle.load(f, encoding="latin1")
     except Exception as e:
         errors["pickle+latin1"] = str(e)
 
-    # ── Strategy 3: plain pickle ──────────────────────────────────────────────
     try:
         with open(model_path, "rb") as f:
             return pickle.load(f)
@@ -347,10 +381,10 @@ def load_model(model_path: str):
         errors["pickle"] = str(e)
 
     raise RuntimeError(
-        "Could not load model. All deserialization strategies failed.\n"
-        "This usually means the .pkl was created with a different scikit-learn "
-        "or Python version. Try re-saving the model in your current environment.\n\n"
-        f"Details:\n" + "\n".join(f"  {k}: {v}" for k, v in errors.items())
+        "Could not load model. All strategies failed.\n"
+        "The .pkl was likely saved with a different scikit-learn / Python version.\n"
+        "Re-save with: import joblib; joblib.dump(model, 'path.pkl')\n\n"
+        "Details:\n" + "\n".join(f"  {k}: {v}" for k, v in errors.items())
     )
 
 
@@ -367,10 +401,8 @@ PLOT_LAYOUT = dict(
     margin=dict(l=50, r=20, t=40, b=40),
     height=280,
 )
-
-HOUR_LABELS = ["H0", "H1", "H2", "H3", "H4", "H5"]
-OBS_COLOR = "#4fc3f7"   # light blue = observed
-SIM_COLOR = "#aed581"   # lime green = simulated
+OBS_COLOR = "#4fc3f7"   # light blue  → observed
+SIM_COLOR = "#aed581"   # lime green  → simulated
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -378,14 +410,27 @@ SIM_COLOR = "#aed581"   # lime green = simulated
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🩺 HD Risk Predictor")
-    st.caption("Hemodialysis session risk assessment via trajectory KNN simulation")
+    st.caption("Hemodialysis session risk assessment via KNN trajectory simulation")
     st.divider()
 
     # ── Demographics ──────────────────────────────────────────────────────────
     st.markdown("### 👤 Patient Demographics")
-    sex_label = st.radio("Sex", ["Female (0)", "Male (1)"], horizontal=True)
-    sex_val = 0 if sex_label.startswith("Female") else 1
-    age_val = st.number_input("Age (years)", min_value=1, max_value=120, value=65, step=1)
+
+    sex_label = st.radio("Sex", ["Male (0)", "Female (1)"], horizontal=True)
+    sex_val = 0 if sex_label.startswith("Male") else 1
+
+    age_val = st.number_input(
+        "Age (years)", min_value=1, max_value=120, value=65, step=1
+    )
+
+    dia_label = st.selectbox(
+        "Dialyzer (DIA)",
+        options=list(DIALYZER_MAP.keys()),
+        index=0,
+        help="Select the dialyzer used in this session.",
+    )
+    dia_val = DIALYZER_MAP[dia_label]
+    st.caption(f"Numeric code: **{dia_val}**")
 
     st.divider()
 
@@ -397,10 +442,18 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Simulation params ─────────────────────────────────────────────────────
+    # ── Simulation parameters ─────────────────────────────────────────────────
     st.markdown("### ⚙️ Simulation Parameters")
-    k_neighbors = st.slider("K-Neighbors (KNN imputation)", min_value=3, max_value=50, value=10, step=1)
-    use_demo = st.toggle("Include demographics in distance", value=True)
+    k_neighbors = st.slider(
+        "K-Neighbors (trajectory imputation)",
+        min_value=3, max_value=50, value=10, step=1,
+        help="Number of historical sessions used to estimate missing hours.",
+    )
+    use_demo = st.toggle(
+        "Include demographics in distance",
+        value=True,
+        help="Use SEX and AGE when searching for nearest neighbours.",
+    )
 
     st.divider()
 
@@ -409,7 +462,7 @@ with st.sidebar:
     uploaded_csv = st.file_uploader(
         "Upload a pre-filled session CSV",
         type=["csv"],
-        help="CSV must have the same columns as dataset_flat.csv (without Target).",
+        help="CSV must have the same column schema as dataset_flat_V2.csv (no Target).",
     )
 
 
@@ -420,56 +473,113 @@ col_title, col_meta = st.columns([3, 1])
 with col_title:
     st.markdown("# Hemodialysis Session Risk Predictor")
     st.markdown(
-        "Enter the clinical signals for **H0** (mandatory) and optionally H1–H5. "
-        "Missing hourly measurements are estimated via **KNN Trajectory Imputation**."
+        "Enter at least the **H0** clinical measurements below. "
+        "Any hour left blank will be **simulated** via trajectory KNN."
     )
 with col_meta:
-    st.metric("Patient Sex", "Male" if sex_val == 1 else "Female")
-    st.metric("Patient Age", f"{age_val} yrs")
+    st.metric("Patient", f"{'♂' if sex_val == 1 else '♀'} · {age_val} yrs")
+    st.metric("Dialyzer", dia_label.split(" - ")[-1][:20])
+    st.metric("Model", model_name.split("(")[0].strip())
 
 st.divider()
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# CLINICAL DATA INPUT
+# CLINICAL DATA INPUT GRID
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown("## 📋 Clinical Data Entry")
+st.markdown("## 📋 Clinical Measurements (H0 – H5)")
 st.caption(
-    "Enable hours with the checkbox. Leave a variable row unchecked if not measured. "
-    "Any unchecked hour will be simulated."
+    "Check the hours you want to enter manually. Unchecked hours will be simulated. "
+    "**H0 is required.** H1–H5 are optional."
 )
 
-# Which hours to show as editable columns
+# Hour-enable checkboxes
 hour_enabled = {}
-hour_cols = st.columns([1] + [1] * 6)
-hour_cols[0].markdown("**Hour**")
+hdr_cols = st.columns([2] + [1] * 6)
+hdr_cols[0].markdown("**Variable**")
 for i, h in enumerate(ALL_HOURS):
-    hour_enabled[h] = hour_cols[i + 1].checkbox(h, value=(h == "H0"), key=f"hour_{h}")
+    hour_enabled[h] = hdr_cols[i + 1].checkbox(h, value=(h == "H0"), key=f"hour_{h}")
 
 st.markdown("")
 
-# Build input grid: rows = variables, cols = hours
-observed = {var: {} for var in CLINICAL_VARS}
+# Build input dict — None means "simulate this slot"
+observed: dict = {var: {} for var in CLINICAL_VARS}
 
-for var in CLINICAL_VARS:
-    with st.expander(f"**{var}** — {VAR_LABELS[var]}", expanded=(var in ["SBP", "DBP", "HRA"])):
-        inp_cols = st.columns([1] + [1] * 6)
-        inp_cols[0].markdown(f"*{var}*")
-        default, mn, mx, step = VAR_DEFAULTS[var]
-        for i, h in enumerate(ALL_HOURS):
-            if hour_enabled[h]:
-                val = inp_cols[i + 1].number_input(
-                    label=h,
-                    min_value=float(mn),
-                    max_value=float(mx),
-                    value=float(default),
-                    step=float(step),
-                    key=f"{var}_{h}",
-                    label_visibility="collapsed",
-                )
-                observed[var][h] = val
-            else:
-                inp_cols[i + 1].markdown("<span style='color:#2a3a50'>—</span>", unsafe_allow_html=True)
+# ── Numeric variables ──────────────────────────────────────────────────────
+st.markdown("#### 🔢 Numeric Parameters")
+# Group for readability
+NUMERIC_GROUPS = {
+    "Weight": ["WDR", "WPR", "WPO", "IWG"],
+    "Haemodynamics": ["SBP", "DBP"],
+    "Pressures": ["APR", "VPR", "TMP"],
+    "Flow & Clearance": ["BFR", "KT", "TUF"],
+    "Bath": ["HBC"],
+}
+
+for group_name, vars_in_group in NUMERIC_GROUPS.items():
+    with st.expander(f"**{group_name}**", expanded=(group_name in ["Haemodynamics", "Weight"])):
+        for var in vars_in_group:
+            default, mn, mx, step = VAR_DEFAULTS[var]
+            inp_cols = st.columns([2] + [1] * 6)
+            inp_cols[0].markdown(f"*{var}* — {VAR_LABELS[var]}", unsafe_allow_html=False)
+            for i, h in enumerate(ALL_HOURS):
+                if hour_enabled[h]:
+                    val = inp_cols[i + 1].number_input(
+                        label=f"{var} {h}",
+                        min_value=float(mn),
+                        max_value=float(mx),
+                        value=float(default),
+                        step=float(step),
+                        key=f"{var}_{h}",
+                        label_visibility="collapsed",
+                    )
+                    observed[var][h] = val
+                else:
+                    inp_cols[i + 1].markdown(
+                        "<span style='color:#2a3a50'>—</span>",
+                        unsafe_allow_html=True,
+                    )
+
+# ── Bath Group (mutually exclusive — one-hot encoded in the dataset) ──────
+st.markdown("#### 🔘 Bath Group")
+st.caption(
+    "The bath group is a categorical variable encoded as three binary columns "
+    "(`BAT_GROUP_Grupo 1/2/3`). Select one group per enabled hour. "
+    "Because bath group rarely changes mid-session, you can use **Apply to all hours** "
+    "to propagate the H0 selection automatically."
+)
+
+# Convenience: copy H0 selection to all enabled hours
+_bat_groups = list(BAT_GROUP_OPTIONS.keys())
+
+bat_hdr = st.columns([2] + [1] * 6)
+bat_hdr[0].markdown("**Hour**")
+for i, h in enumerate(ALL_HOURS):
+    bat_hdr[i + 1].markdown(f"**{h}**" if hour_enabled[h] else f"~~{h}~~")
+
+bat_row = st.columns([2] + [1] * 6)
+bat_row[0].markdown("*Bath Group*")
+
+bat_selections: dict[str, str | None] = {}   # hour → selected group label
+for i, h in enumerate(ALL_HOURS):
+    if hour_enabled[h]:
+        sel = bat_row[i + 1].selectbox(
+            label=f"BAT {h}",
+            options=_bat_groups,
+            index=0,
+            key=f"BAT_GROUP_{h}",
+            label_visibility="collapsed",
+        )
+        bat_selections[h] = sel
+    else:
+        bat_row[i + 1].markdown("<span style='color:#2a3a50'>—</span>", unsafe_allow_html=True)
+        bat_selections[h] = None
+
+# Convert bath group selections → per-variable, per-hour binary values
+for group_label, col_name in BAT_GROUP_OPTIONS.items():
+    for h in ALL_HOURS:
+        sel = bat_selections.get(h)
+        if sel is not None:
+            observed[col_name][h] = 1.0 if sel == group_label else 0.0
 
 st.divider()
 
@@ -479,38 +589,49 @@ st.divider()
 run_col, _ = st.columns([1, 3])
 run_btn = run_col.button("▶  Simulate & Predict", use_container_width=True)
 
-
 if run_btn:
-    # ── Load dataset ──────────────────────────────────────────────────────────
+
+    # ── Dataset ───────────────────────────────────────────────────────────────
     if not os.path.exists(DATASET_PATH):
-        st.error(f"Dataset not found at `{DATASET_PATH}`. Please check your directory.")
+        st.error(
+            f"Dataset not found at `{DATASET_PATH}`. "
+            "Make sure `data/dataset_flat_V2.csv` is in the working directory."
+        )
         st.stop()
 
     with st.spinner("Loading historical dataset…"):
         df_hist = load_dataset(DATASET_PATH)
 
-    # ── Override with uploaded CSV if provided ────────────────────────────────
+    # ── Optional CSV override ─────────────────────────────────────────────────
     if uploaded_csv is not None:
         try:
-            df_uploaded = pd.read_csv(uploaded_csv, sep=";")
-            # Extract first row as observed values
+            df_up = pd.read_csv(uploaded_csv, sep=";")
             for var in CLINICAL_VARS:
                 for h in ALL_HOURS:
                     col = f"{var}_{h}"
-                    if col in df_uploaded.columns and not df_uploaded[col].isna().all():
-                        observed[var][h] = float(df_uploaded[col].iloc[0])
-                        hour_enabled[h] = True
+                    if col in df_up.columns and not df_up[col].isna().all():
+                        observed[var][h] = float(df_up[col].iloc[0])
+            # Override demographics if present
+            if "SEX" in df_up.columns:
+                sex_val = int(df_up["SEX"].iloc[0])
+            if "AGE" in df_up.columns:
+                age_val = int(df_up["AGE"].iloc[0])
+            if "DIA" in df_up.columns:
+                dia_val = int(df_up["DIA"].iloc[0])
             st.success("CSV loaded — values populated from first row.")
         except Exception as e:
             st.warning(f"Could not parse uploaded CSV: {e}")
 
-    # ── Validate at least one H0 value ───────────────────────────────────────
-    any_h0 = any(observed[v].get("H0") is not None for v in CLINICAL_VARS)
+    # ── Validate H0 presence ──────────────────────────────────────────────────
+    any_h0 = any(
+        observed[v].get("H0") is not None
+        for v in CLINICAL_VARS
+    )
     if not any_h0:
-        st.error("Please enter at least one H0 clinical measurement before simulating.")
+        st.error("❌ Please enter at least one H0 clinical value before simulating.")
         st.stop()
 
-    # ── Run KNN trajectory simulation ─────────────────────────────────────────
+    # ── KNN trajectory simulation ─────────────────────────────────────────────
     with st.spinner("Running KNN trajectory simulation…"):
         try:
             full_result = simulate_missing_hours(
@@ -525,95 +646,94 @@ if run_btn:
             st.error(f"Simulation error: {e}")
             st.stop()
 
-    # Determine which hours were observed vs simulated per variable
+    # Track which hours were observed vs simulated
     observed_hours = {
-        var: set(h for h, v in observed[var].items() if v is not None)
+        var: {h for h, v in observed[var].items() if v is not None}
         for var in CLINICAL_VARS
     }
 
-    # ── Build flat vector for model ───────────────────────────────────────────
-    X_model = build_flat_vector(full_result, sex=sex_val, age=age_val)
+    # ── Build flat vector → model ─────────────────────────────────────────────
+    X_model = build_flat_vector(full_result, sex=sex_val, age=age_val, dia=dia_val)
 
-    # ── Load and apply prediction model ──────────────────────────────────────
+    # ── Load model and predict ────────────────────────────────────────────────
     if not os.path.exists(model_path):
-        st.error(f"Model not found at `{model_path}`.")
+        st.error(
+            f"Model not found at `{model_path}`. "
+            "Check that the `models_V2/` directory is present."
+        )
         st.stop()
 
     with st.spinner("Applying prediction model…"):
         try:
             model = load_model(model_path)
             prediction = int(model.predict(X_model)[0])
-            if hasattr(model, "predict_proba"):
-                prob = float(model.predict_proba(X_model)[0][1])
-            else:
-                prob = None
+            prob = (
+                float(model.predict_proba(X_model)[0][1])
+                if hasattr(model, "predict_proba") else None
+            )
         except Exception as e:
             err_msg = str(e)
             st.error("**Model prediction error**")
             if "STACK_GLOBAL requires str" in err_msg or "requires str" in err_msg:
                 st.warning(
-                    "**Root cause:** The `.pkl` file was saved with an older version of "
-                    "scikit-learn or Python and cannot be loaded by the current environment. \n\n"
-                    "**Fix:** Open your training notebook and re-save the model with:\n"
+                    "**Root cause:** The `.pkl` was saved with an older scikit-learn / "
+                    "Python version and cannot be deserialised by the current environment.\n\n"
+                    "**Fix:** Re-save the model in your training notebook:\n"
                     "```python\n"
                     "import joblib\n"
-                    "joblib.dump(model, 'models/modelo_knn.pkl')\n"
+                    "joblib.dump(model, 'models_V2/modelo_knn.pkl')\n"
                     "```\n"
-                    "Then replace the `.pkl` file and reload the dashboard."
+                    "Then replace the file and restart the dashboard."
                 )
             else:
                 st.code(err_msg)
             st.stop()
 
-    st.success("Simulation and prediction complete!")
+    st.success("✅ Simulation and prediction complete!")
     st.divider()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # RESULTS: SUMMARY & ALERT
+    # RESULTS — ALERT + METRICS
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("## 🔬 Results")
 
-    # Alert card
     if prediction == 1:
-        alert_class = "alert-danger"
-        alert_icon = "⚠️"
+        alert_class, alert_icon = "alert-danger", "⚠️"
         alert_title = "HIGH RISK — Hypotensive Event Predicted"
         alert_body = (
-            f"The model <b>{model_name}</b> predicts an intradialytic hypotensive event "
-            f"(TARGET = 1){(' with probability <b>' + f'{prob:.1%}</b>') if prob is not None else ''}. "
-            "Close patient monitoring is recommended."
+            f"Model <b>{model_name}</b> predicts an intradialytic hypotensive event "
+            f"(TARGET = 1)"
+            + (f" with probability <b>{prob:.1%}</b>." if prob is not None else ".")
+            + " Close patient monitoring is recommended."
         )
     else:
-        alert_class = "alert-safe"
-        alert_icon = "✅"
+        alert_class, alert_icon = "alert-safe", "✅"
         alert_title = "LOW RISK — No Hypotensive Event Predicted"
         alert_body = (
-            f"The model <b>{model_name}</b> predicts no hypotensive event "
-            f"(TARGET = 0){(' with probability <b>' + f'{(1-prob):.1%}</b>') if prob is not None else ''}."
+            f"Model <b>{model_name}</b> predicts no hypotensive event "
+            f"(TARGET = 0)"
+            + (f" with probability <b>{(1 - prob):.1%}</b>." if prob is not None else ".")
         )
 
     st.markdown(
-        f"""
-        <div class="{alert_class}">
-            <div style="font-size:1.3rem; font-weight:600;">{alert_icon} {alert_title}</div>
-            <div style="margin-top:8px; font-family:'IBM Plex Sans',sans-serif; font-size:0.95rem;">{alert_body}</div>
-        </div>
-        """,
+        f"""<div class="{alert_class}">
+            <div style="font-size:1.3rem;font-weight:600;">{alert_icon} {alert_title}</div>
+            <div style="margin-top:8px;font-family:'IBM Plex Sans',sans-serif;font-size:0.95rem;">{alert_body}</div>
+        </div>""",
         unsafe_allow_html=True,
     )
-
     st.markdown("")
 
-    # Metrics row
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Prediction", "HIGH RISK" if prediction == 1 else "LOW RISK")
     m2.metric("TARGET", str(prediction))
+    m3.metric("Dialyzer", dia_label.split(" - ")[-1][:15])
     if prob is not None:
-        m3.metric("Prob (TARGET=1)", f"{prob:.1%}")
-        m4.metric("Confidence", f"{max(prob, 1-prob):.1%}")
+        m4.metric("P(TARGET=1)", f"{prob:.1%}")
+        m5.metric("Confidence", f"{max(prob, 1 - prob):.1%}")
     else:
-        m3.metric("Prob (TARGET=1)", "N/A")
-        m4.metric("Model", model_name.split("(")[0].strip())
+        m4.metric("P(TARGET=1)", "N/A")
+        m5.metric("Model", model_name.split("(")[0].strip()[:14])
 
     st.divider()
 
@@ -623,11 +743,10 @@ if run_btn:
     st.markdown("## 📊 H0–H5 Session Data *(observed + simulated)*")
     st.caption(
         "<span class='chip-observed'>● Observed</span>&nbsp;&nbsp;"
-        "<span class='chip-simulated'>● Simulated</span>",
+        "<span class='chip-simulated'>◌ Simulated</span>",
         unsafe_allow_html=True,
     )
 
-    # Build display DataFrame
     rows = []
     for var in CLINICAL_VARS:
         row = {"Variable": f"{var} — {VAR_LABELS[var]}"}
@@ -636,7 +755,7 @@ if run_btn:
             is_obs = h in observed_hours[var]
             if val is not None:
                 tag = "●" if is_obs else "◌"
-                row[h] = f"{tag} {val:.2f}"
+                row[h] = f"{tag} {val:.3f}"
             else:
                 row[h] = "—"
         rows.append(row)
@@ -650,22 +769,22 @@ if run_btn:
             return "color: #aed581; background-color: #162300;"
         return ""
 
-    styled = df_display.style.map(style_cell)
-    st.dataframe(styled, use_container_width=True)
+    st.dataframe(df_display.style.map(style_cell), use_container_width=True)
 
     st.divider()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # INTERACTIVE CHARTS — grouped by clinical category
+    # INTERACTIVE CHARTS
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("## 📈 Clinical Trajectories")
 
     VAR_GROUPS = {
-        "Haemodynamics": ["SBP", "DBP", "HRA"],
-        "Pressures": ["APR", "VPR", "TMP"],
+        "Haemodynamics":    ["SBP", "DBP"],
+        "Pressures":        ["APR", "VPR", "TMP"],
         "Flow & Clearance": ["BFR", "KT", "TUF"],
-        "Volume & Weight": ["IWG", "VOL"],
-        "Bath Parameters": ["HBC"],
+        "Weight":           ["WDR", "WPR", "WPO", "IWG"],
+        "Bath":             ["HBC"],
+        "Bath Groups":      ["BAT_GROUP_Grupo 1 - ACF 3A5", "BAT_GROUP_Grupo 2 - EuCliD", "BAT_GROUP_Grupo 3 - Demais classes"],
     }
 
     tabs = st.tabs(list(VAR_GROUPS.keys()))
@@ -685,60 +804,48 @@ if run_btn:
                     y_sim = [vals[i] for i in x_sim]
 
                     fig = go.Figure()
-
-                    # Full line (dashed)
                     x_all = [i for i, v in enumerate(vals) if v is not None]
                     y_all = [v for v in vals if v is not None]
                     fig.add_trace(go.Scatter(
-                        x=x_all, y=y_all,
-                        mode="lines",
+                        x=x_all, y=y_all, mode="lines",
                         line=dict(color="#1e3a5f", width=1.5, dash="dot"),
                         showlegend=False, hoverinfo="skip",
                     ))
-
-                    # Observed points
                     if x_obs:
                         fig.add_trace(go.Scatter(
-                            x=x_obs, y=y_obs,
-                            mode="markers+lines",
-                            name="Observed",
+                            x=x_obs, y=y_obs, mode="markers+lines", name="Observed",
                             marker=dict(size=9, color=OBS_COLOR, symbol="circle",
                                         line=dict(color="#e3f2fd", width=1)),
                             line=dict(color=OBS_COLOR, width=2),
                         ))
-
-                    # Simulated points
                     if x_sim:
                         fig.add_trace(go.Scatter(
-                            x=x_sim, y=y_sim,
-                            mode="markers+lines",
-                            name="Simulated",
+                            x=x_sim, y=y_sim, mode="markers+lines", name="Simulated",
                             marker=dict(size=9, color=SIM_COLOR, symbol="diamond",
                                         line=dict(color="#f9fbe7", width=1)),
                             line=dict(color=SIM_COLOR, width=2, dash="dash"),
                         ))
 
-                    chart_layout = {**PLOT_LAYOUT}
-                    chart_layout["title"] = dict(text=f"{var}", font=dict(size=13, color="#81d4fa"))
-                    chart_layout["xaxis"] = dict(
-                        tickmode="array",
-                        tickvals=list(range(6)),
-                        ticktext=ALL_HOURS,
+                    layout = {**PLOT_LAYOUT}
+                    short_label = var.replace("BAT_GROUP_", "")
+                    layout["title"] = dict(text=short_label, font=dict(size=13, color="#81d4fa"))
+                    layout["xaxis"] = dict(
+                        tickmode="array", tickvals=list(range(6)),
+                        ticktext=ALL_HOURS, gridcolor="#1e2d45",
+                    )
+                    layout["yaxis"] = dict(
+                        title=VAR_LABELS.get(var, "").split("(")[-1].replace(")", ""),
                         gridcolor="#1e2d45",
                     )
-                    chart_layout["yaxis"] = dict(
-                        title=VAR_LABELS[var].split("(")[-1].replace(")", ""),
-                        gridcolor="#1e2d45",
-                    )
-                    chart_layout["showlegend"] = True
-                    chart_layout["legend"] = dict(orientation="h", y=1.12, x=0)
-                    fig.update_layout(**chart_layout)
+                    layout["showlegend"] = True
+                    layout["legend"] = dict(orientation="h", y=1.12, x=0)
+                    fig.update_layout(**layout)
                     st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # PROBABILITY GAUGE (if available)
+    # PROBABILITY GAUGE
     # ─────────────────────────────────────────────────────────────────────────
     if prob is not None:
         st.markdown("## 🎯 Prediction Confidence")
@@ -753,25 +860,19 @@ if run_btn:
                     "axis": {"range": [0, 100], "tickwidth": 1, "tickcolor": "#64b5f6"},
                     "bar": {"color": "#f44336" if prob >= 0.5 else "#4caf50"},
                     "bgcolor": "#0d1a2e",
-                    "borderwidth": 1,
-                    "bordercolor": "#1e3a5f",
+                    "borderwidth": 1, "bordercolor": "#1e3a5f",
                     "steps": [
-                        {"range": [0, 30], "color": "#1b3a2d"},
+                        {"range": [0, 30],  "color": "#1b3a2d"},
                         {"range": [30, 60], "color": "#2a3a00"},
                         {"range": [60, 80], "color": "#3e2000"},
-                        {"range": [80, 100], "color": "#3e0000"},
+                        {"range": [80, 100],"color": "#3e0000"},
                     ],
-                    "threshold": {
-                        "line": {"color": "#ffeb3b", "width": 3},
-                        "thickness": 0.8,
-                        "value": 50,
-                    },
+                    "threshold": {"line": {"color": "#ffeb3b", "width": 3}, "thickness": 0.8, "value": 50},
                 },
                 title={"text": "P(Hypotension)", "font": {"color": "#81d4fa", "family": "IBM Plex Mono"}},
             ))
             fig_gauge.update_layout(
-                paper_bgcolor="#0a0e17",
-                height=300,
+                paper_bgcolor="#0a0e17", height=300,
                 margin=dict(l=30, r=30, t=40, b=10),
                 font=dict(color="#c8d8e8"),
             )
@@ -779,13 +880,12 @@ if run_btn:
 
         with text_col:
             st.markdown("### Interpretation")
-            thresholds = [
+            for thr, msg in [
                 (0.8, "🔴 **CRITICAL** — Very high risk. Immediate monitoring required."),
                 (0.6, "🟠 **HIGH** — Significant risk. Increased vigilance advised."),
                 (0.4, "🟡 **MODERATE** — Borderline. Standard monitoring."),
                 (0.0, "🟢 **LOW** — Low risk. Routine session expected."),
-            ]
-            for thr, msg in thresholds:
+            ]:
                 if prob >= thr:
                     st.markdown(msg)
                     break
@@ -794,19 +894,21 @@ if run_btn:
 | Metric | Value |
 |--------|-------|
 | P(TARGET=1) | `{prob:.4f}` |
-| P(TARGET=0) | `{1-prob:.4f}` |
+| P(TARGET=0) | `{1 - prob:.4f}` |
 | Predicted class | `{prediction}` |
 | Model | `{model_name.split("(")[0].strip()}` |
+| SEX | `{'Female' if sex_val == 1 else 'Male'}` |
+| AGE | `{age_val}` |
+| DIA | `{dia_label}` |
 """)
 
-    st.divider()
+        st.divider()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # EXPORT CSV
+    # EXPORT
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("## 💾 Export Report")
 
-    # Build export DataFrame
     export_rows = []
     for var in CLINICAL_VARS:
         for h in ALL_HOURS:
@@ -819,34 +921,35 @@ if run_btn:
                 "Source": "Observed" if is_obs else "Simulated",
                 "SEX": sex_val,
                 "AGE": age_val,
+                "DIA_code": dia_val,
+                "DIA_label": dia_label,
                 "Prediction_TARGET": prediction,
                 "Probability_TARGET1": round(prob, 4) if prob is not None else None,
                 "Model": model_name,
                 "K_neighbors": k_neighbors,
+                "Use_demographics": use_demo,
             })
 
     df_export = pd.DataFrame(export_rows)
-
-    csv_buffer = io.StringIO()
-    df_export.to_csv(csv_buffer, index=False, sep=";")
-    csv_str = csv_buffer.getvalue()
+    buf = io.StringIO()
+    df_export.to_csv(buf, index=False, sep=";")
 
     exp_col1, exp_col2 = st.columns([1, 3])
     exp_col1.download_button(
         label="⬇  Download CSV Report",
-        data=csv_str,
-        file_name=f"hd_session_SEX{sex_val}_AGE{age_val}.csv",
+        data=buf.getvalue(),
+        file_name=f"hd_session_SEX{sex_val}_AGE{age_val}_DIA{dia_val}.csv",
         mime="text/csv",
         use_container_width=True,
     )
+    n_obs = sum(1 for r in export_rows if r["Source"] == "Observed")
+    n_sim = sum(1 for r in export_rows if r["Source"] == "Simulated")
     exp_col2.caption(
-        f"Report contains {len(df_export)} rows "
-        f"({len([r for r in export_rows if r['Source']=='Observed'])} observed, "
-        f"{len([r for r in export_rows if r['Source']=='Simulated'])} simulated) "
-        f"across {len(CLINICAL_VARS)} clinical variables."
+        f"Report: {len(df_export)} rows — "
+        f"{n_obs} observed, {n_sim} simulated — "
+        f"{len(CLINICAL_VARS)} clinical variables."
     )
 
-    # Preview
     with st.expander("Preview export data"):
         st.dataframe(df_export, use_container_width=True)
 
@@ -858,5 +961,5 @@ st.divider()
 st.caption(
     "HD Risk Predictor · KNN Trajectory Imputation · "
     "Built with Streamlit & Plotly · "
-    "All predictions are decision-support only and must be reviewed by clinical staff."
+    "All predictions are decision-support tools only and must be reviewed by clinical staff."
 )

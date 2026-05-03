@@ -1,353 +1,338 @@
-# TCC
+# 🩺 Intradialytic Hypotension Prediction Dashboard
 
-# Dashboard de Predição de Risco em Hemodiálise
-
-> Documentação técnica — `src/dashboard.py`  
-> Universidade Federal de São Carlos (UFSCar) · Trabalho de Conclusão de Curso  
-> Autor: Cauã Benini da Silva
+> Trabalho de Conclusão de Curso — Predição de hipotensão intradiálica em sessões de hemodiálise via aprendizado supervisionado e simulação de trajetória clínica.
 
 ---
 
 ## Sumário
 
-1. [Visão Geral](#1-visão-geral)
-2. [Estrutura de Diretórios](#2-estrutura-de-diretórios)
-3. [Instalação e Execução](#3-instalação-e-execução)
-4. [Interface do Dashboard](#4-interface-do-dashboard)
-   - 4.1 [Barra Lateral (Sidebar)](#41-barra-lateral-sidebar)
-   - 4.2 [Entrada de Dados Clínicos](#42-entrada-de-dados-clínicos)
-   - 4.3 [Resultados e Visualizações](#43-resultados-e-visualizações)
-5. [Simulação de Valores Faltantes via KNN de Trajetória](#5-simulação-de-valores-faltantes-via-knn-de-trajetória)
-   - 5.1 [Motivação](#51-motivação)
-   - 5.2 [Algoritmo passo a passo](#52-algoritmo-passo-a-passo)
-   - 5.3 [Parâmetros configuráveis](#53-parâmetros-configuráveis)
-   - 5.4 [Exemplo ilustrativo](#54-exemplo-ilustrativo)
-6. [Cálculo da Confiança da Predição](#6-cálculo-da-confiança-da-predição)
-   - 6.1 [Saída do modelo](#61-saída-do-modelo)
-   - 6.2 [Tabela de métricas](#62-tabela-de-métricas)
-   - 6.3 [Interpretação das faixas de risco](#63-interpretação-das-faixas-de-risco)
-7. [Modelos Disponíveis](#7-modelos-disponíveis)
-8. [Exportação de Relatório](#8-exportação-de-relatório)
-9. [Variáveis Clínicas](#9-variáveis-clínicas)
-10. [Decisões Técnicas e Limitações](#10-decisões-técnicas-e-limitações)
+1. [Visão Geral](#visão-geral)
+2. [Dependências e Instalação](#dependências-e-instalação)
+3. [Demonstração do Dashboard](#demonstração-do-dashboard)
+4. [Estrutura do Projeto](#estrutura-do-projeto)
+5. [Fonte dos Dados](#fonte-dos-dados)
+6. [Descrição dos Atributos](#descrição-dos-atributos)
+7. [Metodologia](#metodologia)
+8. [Modelos Disponíveis](#modelos-disponíveis)
+9. [Descrição dos Arquivos](#descrição-dos-arquivos)
+10. [Referências](#referências)
 
 ---
 
-## 1. Visão Geral
+## Visão Geral
 
-O dashboard tem como objetivo apoiar profissionais de saúde na **predição de hipotensão intradiálica** (TARGET = 1) durante sessões de hemodiálise. A ferramenta combina duas etapas principais:
+A **hipotensão intradiálica** (IDH — *Intradialytic Hypotension*) é a complicação mais frequente em sessões de hemodiálise, afetando pacientes com insuficiência renal crônica. Este projeto desenvolve um pipeline completo — da exploração e pré-processamento dos dados até a implantação de um dashboard interativo — para **prever episódios de hipotensão** com base em sinais clínicos medidos ao longo da sessão.
 
-1. **Imputação de valores faltantes** — quando o usuário fornece apenas medições parciais da sessão (por exemplo, apenas a primeira hora), os valores das horas restantes são estimados automaticamente por meio de um algoritmo de KNN de Trajetória com Ponderação por Distância.
+### Fluxo geral
 
-2. **Predição de risco** — com o vetor clínico completo (H0 a H5), um modelo de *machine learning* pré-treinado classifica a sessão como de alto risco (TARGET = 1) ou baixo risco (TARGET = 0) e, quando possível, fornece a probabilidade associada.
+```
+dataset.csv  →  [TCC_1: Pré-processamento]  →  dataset_flat_V2.csv
+                                                       ↓
+                                          [TCC_3: Treinamento]  →  models_V2/*.pkl
+                                                       ↓
+                                          [src/dashboard.py]  →  Predição interativa
+```
 
-> **Aviso clínico:** todas as predições são de caráter exclusivamente de suporte à decisão e devem ser revisadas por profissional de saúde habilitado.
+### Destaques técnicos
+
+- **Simulação de horas faltantes** por *KNN de Trajetória com Ponderação por Distância*: dado que o usuário insere apenas H0 (ou H0+H1), o sistema estima as horas restantes buscando sessões historicamente similares no dataset.
+- **Separação por tipo de variável**: variáveis numéricas são imputadas por média ponderada dos K vizinhos; variáveis categóricas (BAT_GROUP) são propagadas por *carry-forward*, preservando a semântica one-hot.
+- **Suporte a múltiplos modelos**: SVM, Random Forest, XGBoost, KNN, Decision Tree, MLP e Naive Bayes.
+- **Dashboard Streamlit** com visualizações Plotly, exportação CSV e seleção interativa de parâmetros.
 
 ---
 
-## 2. Estrutura de Diretórios
+## Dependências e Instalação
+
+### Pré-requisitos
+
+- Python **3.10+**
+- `git`
+
+### Opção 1 — Ambiente virtual (`venv`) *(recomendado)*
+
+```bash
+# 1. Clone o repositório
+git clone https://github.com/CBenini07/TCC.git
+cd TCC
+
+# 2. Crie e ative o ambiente virtual
+python -m venv .venv
+
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+
+# macOS / Linux
+source .venv/bin/activate
+
+# 3. Instale as dependências
+pip install -r requirements.txt
+
+# 4. Execute o dashboard
+streamlit run src/dashboard.py
+```
+
+### Opção 2 — Instalação direta (sem venv)
+
+```bash
+pip install -r requirements.txt
+streamlit run src/dashboard.py
+```
+
+O dashboard abrirá automaticamente em `http://localhost:8501`.
+
+> **Atenção:** os arquivos `data/dataset_flat_V2.csv` e a pasta `models_V2/` devem estar presentes na raiz do projeto. Caso os modelos não estejam incluídos no repositório por restrição de tamanho, execute os notebooks `TCC_1` e `TCC_3` em sequência para gerá-los.
+
+---
+
+## Demonstração do Dashboard
+
+[---INSERIR VÍDEO---]
+
+### Passo a passo de uso
+
+**1. Configure os dados do paciente na barra lateral**
+
+| Campo | Descrição |
+|---|---|
+| **Sex** | Sexo biológico (Female / Male) |
+| **Age** | Idade em anos |
+| **Dialyzer (DIA)** | Tipo de dializador utilizado na sessão (lista com 26 opções) |
+
+**2. Selecione o modelo e os parâmetros de simulação**
+
+- Escolha um dos 7 modelos pré-treinados disponíveis em `models_V2/` - Recomenda-se o `models_V2\modelo_knn.pkl` por possuir a maior taxa de precisão (Taxa de identificações positivas realmente corretas).
+- Ajuste o slider **K-Neighbors** (padrão: 10) — quantidade de sessões históricas usadas para estimar horas faltantes.
+- Marque/desmarque **"Include demographics in distance"** para incluir ou excluir SEX e AGE no cálculo de similaridade.
+
+**3. Ative as horas que deseja preencher manualmente**
+
+- Os checkboxes `H0` a `H5` no topo da grade controlam quais horas serão inseridas.
+- **H0 é obrigatória.** H1–H5 são opcionais — horas não marcadas serão simuladas automaticamente.
+
+**4. Preencha os valores clínicos**
+
+- **Parâmetros Numéricos**: WDR, WPR, WPO, IWG, SBP, DBP, APR, VPR, TMP, BFR, KT, TUF, HBC — um valor por hora habilitada.
+- **Bath Group**: selecione o grupo do banho (ACF 3A5 / EuCliD / Demais classes) para cada hora habilitada. O grupo é propagado automaticamente para as horas não preenchidas (*carry-forward*).
+
+**5. Clique em "▶ Simulate & Predict"**
+
+O app executa:
+1. Simulação KNN das horas faltantes para variáveis numéricas.
+2. Propagação carry-forward para variáveis categóricas (BAT_GROUP).
+3. Montagem do vetor de entrada no formato `dataset_flat_V2.csv`.
+4. Predição pelo modelo selecionado.
+
+**6. Interprete os resultados**
+
+- **Alerta colorido**: ⚠️ ALTO RISCO (TARGET = 1) ou ✅ BAIXO RISCO (TARGET = 0).
+- **Gauge de probabilidade**: P(TARGET = 1) com faixas de interpretação clínica.
+- **Tabela H0–H5**: valores observados (🔵), simulados por KNN (🟢) e propagados (🟠).
+- **Gráficos de trajetória**: séries temporais por grupo clínico (Hemodinâmica, Pressões, Pesos etc.).
+
+**7. Exporte o relatório**
+
+Clique em **"⬇ Download CSV Report"** para salvar um arquivo com todos os valores (origem, hora, valor, probabilidade de predição).
+
+**Opção alternativa — Upload de CSV**
+
+Na barra lateral, faça upload de um `.csv` no mesmo formato de `data/dataset_flat_V2_input_dashboard.csv` para pré-preencher os campos automaticamente.
+
+---
+
+## Estrutura do Projeto
 
 ```
 TCC/
+│
 ├── data/
-│   ├── dataset.csv            # Dataset original (bruto)
-│   └── dataset_flat.csv       # Dataset pré-processado (formato sessão × atributos)
-├── models/
+│   ├── dataset.csv                          # Dataset original (Mendeley)
+│   ├── dataset_selected.csv                 # Subconjunto 7 (benchmark)
+│   ├── dataset_flat.csv                     # Saída do TCC_2 (benchmark)
+│   ├── dataset_flat_V2.csv                  # Saída do TCC_1 (dataset principal)
+│   └── dataset_flat_V2_input_dashboard.csv  # Exemplo de input via CSV
+│
+├── imgs/
+│   ├── subdatasets.png                      # Figura: subconjuntos disponíveis
+│   └── Flat_Process.drawio.png              # Figura: processo de flattening
+│
+├── models/                                  # Modelos treinados no TCC_2 (benchmark)
+│   ├── modelo_DT.pkl
 │   ├── modelo_knn.pkl
+│   ├── modelo_MLP.pkl
+│   ├── modelo_NB.pkl
 │   ├── modelo_RF.pkl
 │   ├── modelo_svm.pkl
-│   ├── modelo_xgboost.pkl
+│   └── modelo_xgboost.pkl
+│
+├── models_V2/                               # Modelos treinados no TCC_3 (principal)
 │   ├── modelo_DT.pkl
+│   ├── modelo_knn.pkl
 │   ├── modelo_MLP.pkl
-│   └── modelo_NB.pkl
+│   ├── modelo_NB.pkl
+│   ├── modelo_RF.pkl
+│   ├── modelo_svm.pkl
+│   └── modelo_xgboost.pkl
+│
 ├── src/
-│   └── dashboard.py           # Aplicação Streamlit
+│   └── dashboard.py                         # Dashboard Streamlit
+│
+├── TCC_1_Analise_Exploratoria.ipynb         # Pré-processamento e flattening
+├── TCC_2_Aplicacao_modelos.ipynb            # Benchmark (subconjunto 7)
+├── TCC_3_Aplicacao_Modelos_V2.ipynb         # Treinamento principal (V2)
 ├── requirements.txt
+├── .gitignore
 └── README.md
 ```
 
 ---
 
-## 3. Instalação e Execução
+## Fonte dos Dados
 
-### Pré-requisitos
+O dataset utilizado é o [**Dialysis database: sessions with valid data of clinical parameters**](https://data.mendeley.com/datasets/7kmtsmsgfw/1), disponibilizado publicamente no repositório Mendeley Data pelos autores do artigo de referência.
 
-- Python 3.9 ou superior
-- Dependências listadas em `requirements.txt`
+Os dados foram coletados no **Hospital Príncipe de Asturias** (Madrid, Espanha) entre **2016 e 2019**, abrangendo:
 
-### Instalação
+- **758 pacientes** submetidos a tratamento de hemodiálise;
+- **~98.015 sessões** de hemodiálise;
+- Até **22 parâmetros clínicos** medidos em seis momentos distintos (H0–H5);
+- Informações demográficas de sexo e idade.
 
-```bash
-# Na raiz do projeto
-pip install -r requirements.txt
-```
+### Definição do target
 
-### Execução
+Episódios de **hipotensão intradiálica** foram identificados pela queda da pressão arterial sistólica ≥ 20 mmHg entre os períodos iniciais e intermediários da sessão. Com base nesse critério, temos as seguintes estatísticas para o dataset antes do pré-processamento:
 
-```bash
-streamlit run src/dashboard.py
-```
-
-O dashboard será aberto automaticamente no navegador em `http://localhost:8501`.
-
-### Re-serialização dos modelos (caso ocorra erro de versão)
-
-Se aparecer o erro `STACK_GLOBAL requires str` ao carregar um modelo, re-salve todos os `.pkl` no notebook de treinamento usando `joblib`, que é o serializador recomendado pelo scikit-learn:
-
-```python
-import joblib
-
-joblib.dump(modelo_knn,     'models/modelo_knn.pkl')
-joblib.dump(modelo_RF,      'models/modelo_RF.pkl')
-joblib.dump(modelo_svm,     'models/modelo_svm.pkl')
-joblib.dump(modelo_xgboost, 'models/modelo_xgboost.pkl')
-joblib.dump(modelo_DT,      'models/modelo_DT.pkl')
-joblib.dump(modelo_MLP,     'models/modelo_MLP.pkl')
-joblib.dump(modelo_NB,      'models/modelo_NB.pkl')
-```
-
----
-
-## 4. Interface do Dashboard
-
-### 4.1 Barra Lateral (Sidebar)
-
-| Controle | Descrição |
-|---|---|
-| **Sexo** | Sexo do paciente: `Female (0)` ou `Male (1)` |
-| **Idade** | Idade em anos (inteiro, 1–120) |
-| **Modelo** | Lista suspensa com os 7 modelos pré-treinados disponíveis |
-| **K-Vizinhos** | Número de vizinhos utilizados na imputação KNN (padrão: 10, intervalo: 3–50) |
-| **Incluir demografia** | Toggle para incluir SEX e AGE no cálculo de distância do KNN |
-| **Upload CSV** | Carregamento opcional de um arquivo `.csv` com dados pré-preenchidos no mesmo formato do `dataset_flat.csv` |
-
-### 4.2 Entrada de Dados Clínicos
-
-A seção principal exibe uma grade de entrada com:
-
-- **Checkboxes de hora (H0–H5):** ativam ou desativam a entrada de dados para aquela hora. H0 vem marcada por padrão. Horas desmarcadas serão **simuladas** automaticamente.
-- **Expanders por variável:** cada uma das 12 variáveis clínicas possui um expander com campos numéricos para cada hora habilitada. Os campos respeitam os limites fisiológicos de cada variável.
-
-Ao clicar em **▶ Simulate & Predict**, o dashboard executa a simulação e a predição.
-
-### 4.3 Resultados e Visualizações
-
-Após a execução, são exibidos:
-
-- **Alerta de risco** com cor e ícone indicativos (🔴 alto risco / 🟢 baixo risco)
-- **Métricas resumidas** (TARGET, probabilidade, confiança, modelo)
-- **Tabela H0–H5** com marcação visual de valores observados (●, azul) e simulados (◌, verde)
-- **Gráficos interativos** de trajetória por categoria clínica (Hemodinâmica, Pressões, Fluxo, Volume, Banho)
-- **Gauge de probabilidade** com faixas de risco e tabela de métricas detalhada
-- **Botão de exportação** de relatório CSV
-
----
-
-## 5. Simulação de Valores Faltantes via KNN de Trajetória
-
-### 5.1 Motivação
-
-Em contexto clínico real, é comum que apenas as medições das primeiras horas de uma sessão estejam disponíveis no momento da tomada de decisão. Para que o modelo preditivo possa ser aplicado mesmo assim — pois ele requer o vetor completo de H0 a H5 —, o dashboard implementa uma estratégia de imputação baseada em **similaridade de trajetória entre sessões históricas**.
-
-A abordagem é distinta de uma imputação simples por média global: em vez de preencher valores faltantes com estatísticas agregadas do dataset inteiro, busca-se as sessões passadas mais parecidas com a sessão atual (com base nos valores já observados) e estima-se as horas faltantes como uma média ponderada dessas sessões análogas.
-
-### 5.2 Algoritmo passo a passo
-
-**Entrada:**
-- Valores observados para um subconjunto de horas (ex.: apenas H0, ou H0+H1)
-- Sexo e idade do paciente
-- Dataset histórico `dataset_flat.csv` com 13.895 sessões completas
-
-**Passo 1 — Construção do vetor de busca**
-
-Apenas as colunas correspondentes às horas e variáveis **efetivamente observadas** são usadas para comparação. Se `use_demographics = True`, SEX e AGE também são incluídos.
-
-```
-vetor_busca = [SEX, AGE, SBP_H0, DBP_H0, HRA_H0, ...]
-               ↑ apenas colunas com valor fornecido pelo usuário
-```
-
-**Passo 2 — Normalização**
-
-O vetor de busca e todas as linhas do dataset histórico são normalizados pelo mesmo `StandardScaler` (média zero, desvio padrão um). Isso garante que variáveis com escalas muito diferentes (ex.: BFR em mL/min vs. IWG em kg) contribuam igualmente para o cálculo de distância.
-
-**Passo 3 — Busca dos K vizinhos mais próximos**
-
-Aplica-se o algoritmo KNN com métrica Euclidiana no espaço normalizado das horas observadas. O resultado são os K índices e distâncias das sessões históricas mais similares.
-
-```
-distâncias, índices = NearestNeighbors(k).kneighbors(vetor_busca_normalizado)
-```
-
-**Passo 4 — Ponderação inversa pela distância**
-
-Cada vizinho recebe um peso inversamente proporcional à sua distância à sessão atual. Vizinhos mais próximos (mais similares) têm maior influência na estimativa:
-
-```
-peso_i = 1 / (distância_i + ε)      (ε = 1×10⁻⁸ para evitar divisão por zero)
-peso_i = peso_i / Σ pesos            (normalização para soma = 1)
-```
-
-**Passo 5 — Estimativa das horas faltantes**
-
-Para cada variável e cada hora que não foi fornecida pelo usuário, calcula-se a média ponderada dos K vizinhos:
-
-```
-valor_estimado(VAR, Hx) = Σ ( peso_i × valor_vizinho_i(VAR, Hx) )
-```
-
-As horas já observadas **nunca são alteradas** — apenas as faltantes recebem estimativas.
-
-**Saída:**
-Um dicionário completo `{variável: {hora: valor}}` para todas as 12 variáveis × 6 horas, pronto para ser convertido no vetor de entrada do modelo preditivo.
-
-### 5.3 Parâmetros configuráveis
-
-| Parâmetro | Controle na UI | Padrão | Efeito |
-|---|---|---|---|
-| `k` | Slider *K-Vizinhos* | 10 | Mais K → estimativa mais suavizada; menos K → mais sensível a sessões individuais |
-| `use_demographics` | Toggle *Incluir demografia* | `True` | Inclui SEX e AGE no espaço de busca; útil quando perfil demográfico é relevante para o padrão clínico |
-
-### 5.4 Exemplo ilustrativo
-
-Suponha que o usuário forneça apenas SBP_H0 = 145 e DBP_H0 = 88. O algoritmo:
-
-1. Busca no histórico as 10 sessões em que SBP_H0 ≈ 145 e DBP_H0 ≈ 88 (considerando também SEX e AGE, se habilitado).
-2. Calcula os pesos inversamente proporcionais às distâncias dessas 10 sessões.
-3. Para SBP_H1, por exemplo, calcula: `SBP_H1 = 0.38×142 + 0.21×139 + 0.14×144 + ... = 141.3`
-4. Repete o processo para todas as 12 variáveis × 5 horas restantes (H1–H5).
-
-O resultado é uma trajetória completa coerente com o padrão histórico de pacientes similares, e não uma simples replicação do valor de H0.
-
----
-
-## 6. Cálculo da Confiança da Predição
-
-### 6.1 Saída do modelo
-
-Após a simulação, o vetor completo (SEX, AGE + 72 atributos clínicos H0–H5) é passado ao modelo pré-treinado selecionado. O modelo retorna:
-
-- **`predict(X)`** — classe predita: `0` (sem hipotensão) ou `1` (hipotensão intradiálica)
-- **`predict_proba(X)`** — vetor de probabilidades `[P(TARGET=0), P(TARGET=1)]`, disponível em todos os modelos exceto SVM linear puro
-
-As probabilidades são estimadas diretamente pelo modelo a partir da estrutura aprendida durante o treinamento. No caso do KNN, por exemplo, `P(TARGET=1)` equivale à fração de vizinhos de treino que pertencem à classe 1; no caso de modelos probabilísticos como Naive Bayes e MLP, deriva-se da função softmax ou da distribuição posterior.
-
-### 6.2 Tabela de métricas
-
-A seção de predição exibe a seguinte tabela de métricas para cada execução:
-
-| Métrica | Valor |
-|---|---|
-| P(TARGET=1) | probabilidade de hipotensão intradiálica |
-| P(TARGET=0) | probabilidade de sessão sem hipotensão |
-| Predicted class | classe predita (0 ou 1) |
-| Model | nome do modelo selecionado |
-
-**Exemplo de saída:**
-
-| Métrica | Valor |
-|---|---|
-| P(TARGET=1) | `0.6135` |
-| P(TARGET=0) | `0.3865` |
-| Predicted class | `1` |
-| Model | `XGBoost` |
-
-Neste exemplo, o modelo XGBoost atribui 61,35% de probabilidade de ocorrência de hipotensão intradiálica, classificando a sessão como de **alto risco** (TARGET = 1).
-
-A **confiança** exibida no card de métricas é calculada como:
-
-```
-Confiança = max( P(TARGET=0), P(TARGET=1) )
-```
-
-Ou seja, reflete o quão certo o modelo está sobre sua própria decisão, independentemente da classe predita. No exemplo acima: `max(0.3865, 0.6135) = 61,35%`.
-
-### 6.3 Interpretação das faixas de risco
-
-O gauge exibido no dashboard usa as seguintes faixas de P(TARGET=1):
-
-| Faixa | Classificação | Recomendação |
+| | Quantidade | % |
 |---|---|---|
-| 0% – 30% | 🟢 **BAIXO** | Sessão de rotina esperada |
-| 30% – 60% | 🟡 **MODERADO** | Monitoramento padrão |
-| 60% – 80% | 🟠 **ALTO** | Vigilância aumentada recomendada |
-| 80% – 100% | 🔴 **CRÍTICO** | Monitoramento imediato necessário |
+| Sessões com hipotensão (TARGET = 1) | ~25.026 | ~26% |
+| Sessões sem hipotensão (TARGET = 0) | ~72.989 | ~74% |
+| Pacientes com ao menos um episódio | 584 | ~77% |
 
-> **Nota:** modelos sem suporte a `predict_proba` (como alguns SVMs com kernel não-linear) retornam apenas a classe predita, sem probabilidade. Nesses casos, o gauge não é exibido.
+### Subconjuntos disponíveis
 
----
+O autor disponibilizou os dados em subconjuntos já anonimizados (sem ID e sem data) e pré-processados (sem valores nulos e sem outliers extremos).
 
-## 7. Modelos Disponíveis
+![Subconjuntos disponíveis](imgs/subdatasets.png)
 
-| Nome no Dashboard | Arquivo | Algoritmo |
-|---|---|---|
-| K-Nearest Neighbor (KNN) | `modelo_knn.pkl` | KNN classificador |
-| Random Forest (RF) | `modelo_RF.pkl` | Ensemble de árvores de decisão |
-| Support Vector Machine (SVM) | `modelo_svm.pkl` | SVM com kernel RBF |
-| XGBoost | `modelo_xgboost.pkl` | Gradient Boosting extremo |
-| Decision Tree (DT) | `modelo_DT.pkl` | Árvore de decisão simples |
-| Multi-Layer Perceptron (MLP) | `modelo_MLP.pkl` | Rede neural densa |
-| Naive Bayes (NB) | `modelo_NB.pkl` | Classificador probabilístico bayesiano |
+Neste projeto foram utilizados:
 
-Todos os modelos foram treinados sobre o `dataset_flat.csv` com amostragem holdout estratificada (80% treino / 20% teste), com estratificação pelo TARGET para manutenção da proporção de classes.
+- **Subconjunto 1** (`dataset.csv`): 97.640 sessões com SEX e AGE válidos — objeto de estudo do `TCC_1` para pré-processamento e geração do `dataset_flat_V2.csv`.
+- **Subconjunto 7** (`dataset_selected.csv`): utilizado em `TCC_2` para benchmark sem pré-processamento aprofundado.
 
 ---
 
-## 8. Exportação de Relatório
-
-Ao final de cada execução, o botão **⬇ Download CSV Report** gera um arquivo `.csv` com as seguintes colunas:
-
-| Coluna | Descrição |
-|---|---|
-| `Variable` | Nome da variável clínica (ex.: `SBP`) |
-| `Hour` | Hora da sessão (H0–H5) |
-| `Value` | Valor observado ou simulado |
-| `Source` | `Observed` (inserido pelo usuário) ou `Simulated` (estimado pelo KNN) |
-| `SEX` | Sexo codificado (0 = feminino, 1 = masculino) |
-| `AGE` | Idade em anos |
-| `Prediction_TARGET` | Classe predita (0 ou 1) |
-| `Probability_TARGET1` | P(TARGET=1), ou vazio se o modelo não suportar |
-| `Model` | Nome do modelo utilizado |
-| `K_neighbors` | Valor de K usado na imputação |
-
-O nome do arquivo segue o padrão `hd_session_SEX{n}_AGE{n}.csv`.
-
----
-
-## 9. Variáveis Clínicas
+## Descrição dos Atributos
 
 | Sigla | Parâmetro | Unidade |
 |---|---|---|
-| IWG | Ganho de peso interdialítico | kg |
+| SEX | Sexo | Male / Female |
+| AGE | Idade | anos |
+| DIA | Dializador | adimensional |
+| BAT | Banho | adimensional |
+| TEC | Tipo de técnica | adimensional |
+| WDR | Peso (seco) | Kg |
+| WPR | Peso (pré-diálise) | Kg |
+| WPO | Peso (pós-diálise) | Kg |
+| IWG | Ganho de peso interdialítico | Kg |
+| HBT | Temperatura do banho de hemodiálise | °C |
 | VOL | Alterações de volume | L |
-| KT | Depuração de ureia | L |
+| KT  | Depuração de ureia | L |
 | BFR | Fluxo sanguíneo | mL/min |
+| HBF | Fluxo do banho de hemodiálise | mL/min |
 | HBC | Condutividade do banho de hemodiálise | mScm |
-| APR | Pressão arterial pré-bomba | mmHg |
-| VPR | Pressão venosa pós-filtro | mmHg |
+| BSC | Condutividade das soluções à base de bicarbonato | mScm |
+| APR | Pressão arterial | mmHg |
+| VPR | Pressão venosa | mmHg |
 | TMP | Pressão transmembrana | mmHg |
 | SBP | Pressão arterial sistólica | mmHg |
 | DBP | Pressão arterial diastólica | mmHg |
 | HRA | Frequência cardíaca | bpm |
-| TUF | Ultrafiltração total | mL |
-
-> **Nota sobre APR:** valores negativos são fisiologicamente esperados na hemodiálise, pois representam a pressão de sucção gerada pela bomba na via arterial do circuito extracorpóreo.
+| TUF | Ultrafiltrações totais | mL |
+| BOT | Temperatura corporal | °C |
 
 ---
 
-## 10. Decisões Técnicas e Limitações
+## Metodologia
 
-### Identificação de pacientes
+### 1. Pré-processamento (`TCC_1_Analise_Exploratoria.ipynb`)
 
-O dataset não possui identificadores individuais explícitos. Seguindo o critério do artigo base (*Predicting the Appearance of Hypotension during Hemodialysis Sessions Using Machine Learning Classifiers*, MDPI, 2021), a combinação **SEX + AGE** é utilizada como proxy de identificação de paciente.
+- Análise estatística e visual de atributos numéricos e categóricos.
+- Remoção de zeros artificiais inseridos pelo autor no dataset original.
+- Remoção de outliers.
+- Seleção de atributos com base em correlação com o Target e qualidade dos dados.
+- Imputação de valores faltantes com **KNN Imputer** (somente variáveis numéricas).
+- **Flattening** das tuplas: cada sessão de 6 linhas é convertida em uma única linha.
 
-### Definição do TARGET
+### 2. Flattening
 
-Um episódio de hipotensão intradiálica é definido como a queda da pressão arterial sistólica ≥ 20 mmHg entre os períodos iniciais e intermediários da sessão. A variável TARGET = 1 indica que ao menos uma medição da sessão satisfez esse critério.
+Os algoritmos de aprendizado supervisionado clássicos não processam naturalmente estruturas temporais. O *flattening* converte cada sessão de hemodiálise (que originalmente ocupava 6 linhas, uma por hora) em **um único vetor de características**, dispondo os valores de H0 a H5 lado a lado:
 
-### Limitações conhecidas
+```
+SEX, AGE, DIA, var1_H0, var1_H1, ..., var1_H5, var2_H0, ..., varN_H5
+```
 
-- **Identificação por SEX+AGE:** pacientes com mesmo sexo e idade são tratados como o mesmo indivíduo, o que pode introduzir ruído nas sessões históricas utilizadas na busca KNN.
-- **Simulação vs. medição real:** os valores imputados são estimativas estatísticas e não substituem medições clínicas reais. A qualidade da simulação depende da representatividade do histórico disponível.
-- **Generalização do modelo:** os modelos foram treinados em dados de um único hospital (Hospital Príncipe de Asturias, Madrid, 2016–2019) e podem não generalizar diretamente para outras populações ou protocolos de diálise.
-- **Ausência de validação prospectiva:** os resultados devem ser interpretados como suporte à decisão clínica, não como diagnóstico definitivo.
+O atributo alvo `Target` é definido como `1` se ao menos uma das seis linhas originais da sessão registrar hipotensão; caso contrário, `0`.
+
+![Processo de Flattening](imgs/Flat_Process.drawio.png)
+
+### 3. Simulação de horas faltantes — KNN de Trajetória
+
+No dashboard, o usuário pode inserir apenas H0 (ou qualquer subconjunto de horas). Para completar o vetor de entrada do modelo, aplica-se uma estratégia de **KNN de Trajetória com Ponderação por Distância**:
+
+1. Monta-se um vetor de busca com as horas **observadas** (+ SEX e AGE, opcionalmente).
+2. Normaliza-se o vetor e busca-se os **K vizinhos mais próximos** no `dataset_flat_V2.csv`.
+3. As horas faltantes são estimadas como **média ponderada pelo inverso da distância** dos K vizinhos.
+
+> ⚠️ Variáveis categóricas (`BAT_GROUP_*`) **não** são imputadas por KNN. Em vez disso, utiliza-se *carry-forward* do último valor observado, preservando a semântica binária da codificação one-hot.
+
+### 4. Treinamento dos modelos (`TCC_3_Aplicacao_Modelos_V2.ipynb`)
+
+- Holdout estratificado 80/20 pelo atributo Target.
+- Otimização de hiperparâmetros por `RandomizedSearchCV` ou `GridSearchCV`.
+- Avaliação por: Acurácia, Precisão, F1-Score e AUC (área sob a curva ROC).
+
+![Medidas de desempenho dos modelos finais](imgs\metrics_V2.png)
+
+---
+
+## Modelos Disponíveis
+
+Os modelos pré-treinados em `models_V2/` são selecionáveis diretamente no dashboard:
+
+| Modelo | Arquivo |
+|---|---|
+| K-Nearest Neighbor | `modelo_knn.pkl` |
+| Random Forest | `modelo_RF.pkl` |
+| Support Vector Machine | `modelo_svm.pkl` |
+| XGBoost | `modelo_xgboost.pkl` |
+| Decision Tree | `modelo_DT.pkl` |
+| Multi-Layer Perceptron | `modelo_MLP.pkl` |
+| Naive Bayes | `modelo_NB.pkl` |
+
+Os modelos da pasta `models/` foram gerados no `TCC_2` sobre o subconjunto 7 e servem apenas como benchmark comparativo.
+
+---
+
+## Descrição dos Arquivos
+
+| Arquivo | Entrada | Saída | Descrição |
+|---|---|---|---|
+| `TCC_1_Analise_Exploratoria.ipynb` | `data/dataset.csv` | `data/dataset_flat_V2.csv` | Análise exploratória, pré-processamento e flattening |
+| `TCC_2_Aplicacao_modelos.ipynb` | `data/dataset_selected.csv` | `data/dataset_flat.csv`, `models/` | Benchmark com subconjunto 7 sem pré-processamento aprofundado |
+| `TCC_3_Aplicacao_Modelos_V2.ipynb` | `data/dataset_flat_V2.csv` | `models_V2/` | Treinamento e avaliação dos modelos principais |
+| `src/dashboard.py` | `data/dataset_flat_V2.csv`, `models_V2/` | — | Dashboard Streamlit interativo |
+| `data/dataset_flat_V2_input_dashboard.csv` | — | — | Exemplo de input via CSV para o dashboard |
+
+---
+
+## Referências
+
+- **Dataset**: Perez-Cisneros, M. et al. *Dialysis database: sessions with valid data of clinical parameters*. Mendeley Data, v1. [https://data.mendeley.com/datasets/7kmtsmsgfw/1](https://data.mendeley.com/datasets/7kmtsmsgfw/1)
+- Streamlit — [https://streamlit.io](https://streamlit.io)
+- scikit-learn — [https://scikit-learn.org](https://scikit-learn.org)
+- XGBoost — [https://xgboost.readthedocs.io](https://xgboost.readthedocs.io)
+- Plotly — [https://plotly.com/python](https://plotly.com/python)
+
+---
+
+> *Este projeto é desenvolvido como Trabalho de Conclusão de Curso. Todas as predições geradas pelo dashboard são ferramentas de apoio à decisão clínica e devem ser interpretadas por profissionais de saúde qualificados.*

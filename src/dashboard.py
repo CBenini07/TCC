@@ -85,15 +85,15 @@ VAR_DEFAULTS = {
     "WPR": (67.0,  20.0, 200.0, 0.1),
     "WPO": (65.0,  20.0, 200.0, 0.1),
     "IWG": (2.0,  -5.0,  10.0, 0.1),
-    "KT":  (5.0,   0.0,  80.0, 0.1),
-    "BFR": (350.0, 50.0, 500.0, 1.0),
-    "HBC": (14.0,  8.0,  20.0, 0.1),
+    "KT":  (55.0,  20.0,  85.0, 1.0),
+    "BFR": (450.0, 50.0, 600.0, 5.0),
+    "HBC": (13.8,  13.5,  14.5, 0.1),
     "APR": (-150.0, -300.0, 0.0, 1.0),
     "VPR": (120.0,  0.0, 300.0, 1.0),
-    "TMP": (200.0,  0.0, 600.0, 1.0),
+    "TMP": (150.0,  0.0, 350.0, 1.0),
     "SBP": (130.0, 60.0, 250.0, 1.0),
-    "DBP": (80.0,  40.0, 140.0, 1.0),
-    "TUF": (500.0,  0.0, 5000.0, 10.0),
+    "DBP": (65.0,  40.0, 140.0, 1.0),
+    "TUF": (0.5,  0.0, 1.5, 0.1),
 }
 
 # ── Dialyzer lookup ──────────────────────────────────────────────────────────
@@ -224,6 +224,11 @@ div[data-baseweb="select"] > div { background: #0d1a2e !important; border-color:
     padding: 2px 8px; border-radius: 12px;
     font-size: 0.7rem; font-family: 'IBM Plex Mono', monospace;
 }
+.chip-carried {
+    background: #1a1400; color: #ffcc80; border: 1px solid #e65100;
+    padding: 2px 8px; border-radius: 12px;
+    font-size: 0.7rem; font-family: 'IBM Plex Mono', monospace;
+}
 
 hr { border-color: #1e3a5f !important; }
 .stDataFrame { border: 1px solid #1e3a5f !important; border-radius: 8px; }
@@ -256,32 +261,41 @@ def simulate_missing_hours(
     Simulates missing hourly clinical measurements using trajectory KNN
     with inverse-distance weighting.
 
+    Rules
+    -----
+    * KNN imputation is applied **only** to NUMERIC_VARS (WDR, WPR, …, TUF).
+      Observed BAT_GROUP values may be included in the neighbour-search query
+      vector (they help find similar sessions) but their missing hours are
+      handled separately via carry-forward — never averaged.
+
+    * BINARY_VARS (BAT_GROUP_*): missing hours are filled by carrying forward
+      the last explicitly observed value for that variable.  If no hour was
+      observed at all the column is left as None.
+
     Parameters
     ----------
-    observed : dict
-        {variable: {hour: value | None}}
-        Hours with non-None values are treated as observed.
-    sex, age : int
-        Patient demographics (used in distance if use_demographics=True).
-    df : pd.DataFrame
-        Historical session dataset (dataset_flat_V2.csv).
-    k : int
-        Number of nearest neighbours.
-    use_demographics : bool
-        Include SEX/AGE in the feature vector for neighbour search.
+    observed : dict  {variable: {hour: value | None}}
+    sex, age : int   Patient demographics.
+    df       : pd.DataFrame  Historical dataset (dataset_flat_V2.csv).
+    k        : int   KNN neighbours.
+    use_demographics : bool  Include SEX/AGE in distance computation.
 
     Returns
     -------
     dict  {variable: {hour: float | None}}
     """
-    feature_cols = []
-    query_values = []
+    # ------------------------------------------------------------------
+    # 1. Build KNN query vector from ALL observed values (numeric + binary)
+    #    so that bath-group membership still contributes to session similarity.
+    # ------------------------------------------------------------------
+    feature_cols: list[str] = []
+    query_values: list[float] = []
 
     if use_demographics:
         feature_cols += ["SEX", "AGE"]
         query_values += [sex, age]
 
-    for var in CLINICAL_VARS:
+    for var in CLINICAL_VARS:          # includes BINARY_VARS intentionally
         for hour in ALL_HOURS:
             col = f"{var}_{hour}"
             if col not in df.columns:
@@ -296,16 +310,23 @@ def simulate_missing_hours(
             "No observed values found. Provide at least one H0 clinical measurement."
         )
 
-    all_clinical_cols = [
+    # ------------------------------------------------------------------
+    # 2. Columns needed to fit the KNN and read neighbour values.
+    #    Only NUMERIC_VARS columns are needed for the output estimation;
+    #    BINARY_VARS columns are only needed insofar as they are in feature_cols.
+    # ------------------------------------------------------------------
+    numeric_output_cols = [
         f"{v}_{h}"
-        for v in CLINICAL_VARS
+        for v in NUMERIC_VARS
         for h in ALL_HOURS
         if f"{v}_{h}" in df.columns
     ]
-
-    needed_cols = list(dict.fromkeys(feature_cols + all_clinical_cols))
+    needed_cols = list(dict.fromkeys(feature_cols + numeric_output_cols))
     df_clean = df[needed_cols].dropna()
 
+    # ------------------------------------------------------------------
+    # 3. Fit KNN in the normalised observed-feature space
+    # ------------------------------------------------------------------
     X = df_clean[feature_cols].values.astype(float)
     scaler = StandardScaler()
     X_sc = scaler.fit_transform(X)
@@ -322,8 +343,11 @@ def simulate_missing_hours(
     weights = 1.0 / (distances + eps)
     weights /= weights.sum()
 
-    result = {}
-    for var in CLINICAL_VARS:
+    # ------------------------------------------------------------------
+    # 4a. Numeric variables — observed kept; missing → KNN weighted mean
+    # ------------------------------------------------------------------
+    result: dict = {}
+    for var in NUMERIC_VARS:
         result[var] = {}
         for hour in ALL_HOURS:
             col = f"{var}_{hour}"
@@ -335,6 +359,25 @@ def simulate_missing_hours(
                 result[var][hour] = float(np.average(neighbor_vals, weights=weights))
             else:
                 result[var][hour] = None
+
+    # ------------------------------------------------------------------
+    # 4b. Categorical (BAT_GROUP) variables — carry-forward only.
+    #     Never KNN-averaged: a weighted mean of 0/1 flags is meaningless.
+    #     Strategy: for each missing hour, propagate the most recent
+    #     explicitly observed value.  If nothing was observed, leave None.
+    # ------------------------------------------------------------------
+    for var in BINARY_VARS:
+        result[var] = {}
+        last_known: float | None = None
+        for hour in ALL_HOURS:
+            val_obs = observed.get(var, {}).get(hour)
+            if val_obs is not None:
+                result[var][hour] = float(val_obs)
+                last_known = float(val_obs)
+            else:
+                # Carry forward — bath group does not change mid-session
+                result[var][hour] = last_known   # None if never observed
+
     return result
 
 
@@ -646,10 +689,20 @@ if run_btn:
             st.error(f"Simulation error: {e}")
             st.stop()
 
-    # Track which hours were observed vs simulated
+    # Track which hours were explicitly observed vs simulated/carried-forward
     observed_hours = {
         var: {h for h, v in observed[var].items() if v is not None}
         for var in CLINICAL_VARS
+    }
+
+    # For binary vars: hours that were carried forward (not observed, not KNN)
+    carried_hours = {
+        var: {
+            h for h in ALL_HOURS
+            if h not in observed_hours[var] and var in BINARY_VARS
+               and full_result[var].get(h) is not None
+        }
+        for var in BINARY_VARS
     }
 
     # ── Build flat vector → model ─────────────────────────────────────────────
@@ -743,7 +796,8 @@ if run_btn:
     st.markdown("## 📊 H0–H5 Session Data *(observed + simulated)*")
     st.caption(
         "<span class='chip-observed'>● Observed</span>&nbsp;&nbsp;"
-        "<span class='chip-simulated'>◌ Simulated</span>",
+        "<span class='chip-simulated'>◌ KNN-simulated</span>&nbsp;&nbsp;"
+        "<span class='chip-carried'>→ Carried forward</span>",
         unsafe_allow_html=True,
     )
 
@@ -753,8 +807,14 @@ if run_btn:
         for h in ALL_HOURS:
             val = full_result[var].get(h)
             is_obs = h in observed_hours[var]
+            is_carried = var in BINARY_VARS and h in carried_hours.get(var, set())
             if val is not None:
-                tag = "●" if is_obs else "◌"
+                if is_obs:
+                    tag = "●"
+                elif is_carried:
+                    tag = "→"
+                else:
+                    tag = "◌"
                 row[h] = f"{tag} {val:.3f}"
             else:
                 row[h] = "—"
@@ -767,6 +827,8 @@ if run_btn:
             return "color: #4fc3f7; background-color: #0d253f;"
         elif isinstance(val, str) and val.startswith("◌"):
             return "color: #aed581; background-color: #162300;"
+        elif isinstance(val, str) and val.startswith("→"):
+            return "color: #ffcc80; background-color: #1a1200;"
         return ""
 
     st.dataframe(df_display.style.map(style_cell), use_container_width=True)
@@ -914,11 +976,18 @@ if run_btn:
         for h in ALL_HOURS:
             val = full_result[var].get(h)
             is_obs = h in observed_hours[var]
+            is_carried = var in BINARY_VARS and h in carried_hours.get(var, set())
+            if is_obs:
+                source = "Observed"
+            elif is_carried:
+                source = "Carried forward"
+            else:
+                source = "KNN-simulated"
             export_rows.append({
                 "Variable": var,
                 "Hour": h,
                 "Value": round(val, 4) if val is not None else None,
-                "Source": "Observed" if is_obs else "Simulated",
+                "Source": source,
                 "SEX": sex_val,
                 "AGE": age_val,
                 "DIA_code": dia_val,

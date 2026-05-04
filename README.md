@@ -1,4 +1,4 @@
-# 🩺 Intradialytic Hypotension Prediction Dashboard
+# Dashboard - Predição de casos de hipotensão intradiálica
 
 > Trabalho de Conclusão de Curso — Predição de hipotensão intradiálica em sessões de hemodiálise via aprendizado supervisionado e simulação de trajetória clínica.
 
@@ -87,7 +87,8 @@ O dashboard abrirá automaticamente em `http://localhost:8501`.
 
 ## Demonstração do Dashboard
 
-[---INSERIR VÍDEO---]
+[![Assista ao vídeo](https://img.youtube.com/vi/pGQkAoc_pig/0.jpg)](https://youtu.be/pGQkAoc_pig)
+(basta clicar para ser redirecionado ao vídeo)
 
 ### Passo a passo de uso
 

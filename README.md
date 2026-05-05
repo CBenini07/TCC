@@ -1,3 +1,10 @@
+<p align="left">
+  <img src="https://img.shields.io/badge/-Python-3776AB?style=flat&logo=python&logoColor=white" />
+  <img src="https://img.shields.io/badge/-Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white" />
+  <img src="https://img.shields.io/badge/-Scikit--Learn-F7931E?style=flat&logo=scikit-learn&logoColor=white" />
+</p>
+
+
 # Dashboard - Predição de casos de hipotensão intradiálica
 
 > Trabalho de Conclusão de Curso — Predição de hipotensão intradiálica em sessões de hemodiálise via aprendizado supervisionado e simulação de trajetória clínica.

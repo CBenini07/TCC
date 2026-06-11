@@ -31,7 +31,7 @@ warnings.filterwarnings("ignore")
 
 # Numeric clinical variables (one input per hour per variable)
 NUMERIC_VARS = [
-    "WDR", "WPR", "WPO", "IWG",
+    "WDR", "IWG",
     "KT", "BFR", "HBC",
     "APR", "VPR", "TMP",
     "SBP", "DBP",
@@ -62,8 +62,6 @@ ALL_HOURS = ["H0", "H1", "H2", "H3", "H4", "H5"]
 # ── Variable display labels ──────────────────────────────────────────────────
 VAR_LABELS = {
     "WDR": "Dry Weight (Kg)",
-    "WPR": "Pre-dialysis Weight (Kg)",
-    "WPO": "Post-dialysis Weight (Kg)",
     "IWG": "Interdialytic Weight Gain (Kg)",
     "KT":  "Urea Clearance (L)",
     "BFR": "Blood Flow Rate (mL/min)",
@@ -82,8 +80,6 @@ VAR_LABELS = {
 # (default, min, max, step) for numeric inputs
 VAR_DEFAULTS = {
     "WDR": (65.0,  20.0, 200.0, 0.1),
-    "WPR": (67.0,  20.0, 200.0, 0.1),
-    "WPO": (65.0,  20.0, 200.0, 0.1),
     "IWG": (2.0,  -5.0,  10.0, 0.1),
     "KT":  (55.0,  20.0,  85.0, 1.0),
     "BFR": (450.0, 50.0, 600.0, 5.0),
@@ -551,7 +547,7 @@ observed: dict = {var: {} for var in CLINICAL_VARS}
 st.markdown("#### 🔢 Numeric Parameters")
 # Group for readability
 NUMERIC_GROUPS = {
-    "Weight": ["WDR", "WPR", "WPO", "IWG"],
+    "Weight": ["WDR", "IWG"],
     "Haemodynamics": ["SBP", "DBP"],
     "Pressures": ["APR", "VPR", "TMP"],
     "Flow & Clearance": ["BFR", "KT", "TUF"],
@@ -844,7 +840,7 @@ if run_btn:
         "Haemodynamics":    ["SBP", "DBP"],
         "Pressures":        ["APR", "VPR", "TMP"],
         "Flow & Clearance": ["BFR", "KT", "TUF"],
-        "Weight":           ["WDR", "WPR", "WPO", "IWG"],
+        "Weight":           ["WDR", "IWG"],
         "Bath":             ["HBC"],
         "Bath Groups":      ["BAT_GROUP_Grupo 1 - ACF 3A5", "BAT_GROUP_Grupo 2 - EuCliD", "BAT_GROUP_Grupo 3 - Demais classes"],
     }

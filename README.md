@@ -94,7 +94,7 @@ O dashboard abrirá automaticamente em `http://localhost:8501`.
 
 ## Demonstração do Dashboard
 
-[![Assista ao vídeo](https://img.youtube.com/vi/pGQkAoc_pig/0.jpg)](https://youtu.be/pGQkAoc_pig)
+[![Assista ao vídeo](https://img.youtube.com/vi/IGZrkuS62bE/0.jpg)](https://youtu.be/IGZrkuS62bE)
 (basta clicar para ser redirecionado ao vídeo)
 
 ### Passo a passo de uso
